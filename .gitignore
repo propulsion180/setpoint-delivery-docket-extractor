@@ -34,3 +34,4 @@ go.work.sum
 token.txt
 deltalink.txt
 token.json
+attachments/*
