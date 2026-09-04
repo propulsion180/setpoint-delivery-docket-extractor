@@ -147,24 +147,36 @@ func checkMail(ctx context.Context, tokenSource oauth2.TokenSource) error {
 				for _, path := range paths {
 					log.Printf(" -> converting and conduction ocr OCR: %s\n", path)
 
-					images, err := pdfToImages(path)
+					docket, err := extractDocketFromPDF(path)
 					if err != nil {
-						log.Printf(" failed to convert %s, %v\n", path, err)
+						log.Printf("failed to extract docket from %s: %v\n", path, err)
 						continue
 					}
 
-					var textSections []string
-					for _, imgPath := range images {
-						text, err := ocrImage(imgPath)
-						if err != nil {
-							log.Printf(" OCR failed on %s: %v\n", imgPath, err)
-							continue
-						}
-						textSections = append(textSections, text)
-						log.Printf(" OCR for %s:\n%s\n", imgPath, text)
+					log.Printf(" docket %s / job %s \n,", docket.Header["docketno"], docket.Header["jobno"])
+					for _, row := range docket.Rows {
+						log.Printf("  part row: %v\n", row)
+						// TODO: write [docket.Header["docketno"], row[0], row[1], row[2]] to SharePoint
 					}
 
-					log.Printf(" Total output of ocr for %s:\n%v\n", path, textSections)
+					// images, err := pdfToImages(path)
+					// if err != nil {
+					// 	log.Printf(" failed to convert %s, %v\n", path, err)
+					// 	continue
+					// }
+
+					// var textSections []string
+					// for _, imgPath := range images {
+					// 	text, err := ocrImage(imgPath)
+					// 	if err != nil {
+					// 		log.Printf(" OCR failed on %s: %v\n", imgPath, err)
+					// 		continue
+					// 	}
+					// 	textSections = append(textSections, text)
+					// 	log.Printf(" OCR for %s:\n%s\n", imgPath, text)
+					// }
+
+					// log.Printf(" Total output of ocr for %s:\n%v\n", path, textSections)
 				}
 			}
 		}
