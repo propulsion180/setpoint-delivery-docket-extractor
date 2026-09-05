@@ -159,6 +159,14 @@ func checkMail(ctx context.Context, tokenSource oauth2.TokenSource) error {
 						// TODO: write [docket.Header["docketno"], row[0], row[1], row[2]] to SharePoint
 					}
 
+					outputDir := os.Getenv("LOCAL_JOB_FILES_DIR")
+					if outputDir == "" {
+						outputDir = "./local-job-files"
+					}
+					if err := addDocketToLocalJobFile(outputDir, docket); err != nil {
+						log.Printf("  failed to write job spreadsheet: %v\n", err)
+						continue
+					}
 					// images, err := pdfToImages(path)
 					// if err != nil {
 					// 	log.Printf(" failed to convert %s, %v\n", path, err)
