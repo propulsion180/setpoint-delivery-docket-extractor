@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,16 +59,33 @@ func extractDocketFromPDF(pdfPath string) (*DeliveryDocket, error) {
 	analyzeURL := fmt.Sprintf("%sdocumentintelligence/documentModels/prebuilt-layout:analyze?api-version=%s",
 		endpoint, docIntelAPIVersion)
 
-	req, err := http.NewRequest("POST", analyzeURL, bytes.NewReader(pdfBytes))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Ocp-Apim-Subscription-Key", key)
-	req.Header.Set("Content-Type", "application/pdf")
+	var resp *http.Response
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequest("POST", analyzeURL, bytes.NewReader(pdfBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Ocp-Apim-Subscription-Key", key)
+		req.Header.Set("Content-Type", "application/pdf")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusTooManyRequests {
+			break
+		}
+
+		wait := 25 * time.Second
+		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+			if secs, err := strconv.Atoi(retryAfter); err == nil {
+				wait = time.Duration(secs) * time.Second
+			}
+		}
+		resp.Body.Close()
+		log.Printf("  rate limited submitting to Document Intelligence, waiting %v before retrying\n", wait)
+		time.Sleep(wait)
 	}
 	defer resp.Body.Close()
 
@@ -80,8 +99,9 @@ func extractDocketFromPDF(pdfPath string) (*DeliveryDocket, error) {
 		return nil, fmt.Errorf("no Operation-Location header in response")
 	}
 
-	// Poll until done, with a sane timeout
-	deadline := time.Now().Add(2 * time.Minute)
+	// Poll until done, with a sane timeout. Extended to 5 minutes to leave
+	// room for rate-limit backoffs on the free tier.
+	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
 
@@ -100,6 +120,18 @@ func extractDocketFromPDF(pdfPath string) (*DeliveryDocket, error) {
 		pollResp.Body.Close()
 		if err != nil {
 			return nil, err
+		}
+
+		if pollResp.StatusCode == http.StatusTooManyRequests {
+			wait := 25 * time.Second
+			if retryAfter := pollResp.Header.Get("Retry-After"); retryAfter != "" {
+				if secs, err := strconv.Atoi(retryAfter); err == nil {
+					wait = time.Duration(secs) * time.Second
+				}
+			}
+			log.Printf("  rate limited by Document Intelligence, waiting %v before retrying\n", wait)
+			time.Sleep(wait)
+			continue
 		}
 
 		if pollResp.StatusCode != http.StatusOK {
@@ -130,16 +162,103 @@ func extractDocketFromPDF(pdfPath string) (*DeliveryDocket, error) {
 	return nil, fmt.Errorf("timed out waiting for analysis to complete")
 }
 
-// extractPartsTable finds the 3-column table (Part No, Item, Quantity) and
-// returns its data rows, excluding the header row.
+// extractPartsTable finds the parts table and returns its data rows as
+// [PartNo, Item, Quantity]. Rather than trusting raw column indices --
+// which Document Intelligence can misalign between the header row and data
+// rows when it detects a spurious empty column (this happens on dockets
+// with very few rows) -- each row's non-empty cells are compressed
+// left-to-right and matched positionally. This is more robust than
+// indexing by column number or by header text position, since header and
+// data rows have been observed to disagree about which raw column index a
+// given field lives in.
+//
+// Two table shapes are recognised:
+//   - 3 header fields (Part No / Item / Quantity): the normal case.
+//   - 2 header fields, where the first normalizes to something containing
+//     "item" (e.g. "Part No. Item" merged into one cell) and the second is
+//     "Quantity": this happens when a docket genuinely has no part number
+//     for a line -- Document Intelligence merges the empty Part No column
+//     into the Item column. PartNo is set to "" for these rows; the caller
+//     is expected to fall back to matching by item name.
 func extractPartsTable(tables []docTable) [][]string {
 	for _, table := range tables {
-		if table.ColumnCount != 3 {
+		grid := cellGrid(table)
+		if len(grid) == 0 {
 			continue
 		}
-		return tableToRows(table)
+
+		header := compressNonEmpty(grid[0])
+
+		var mode string
+		switch len(header) {
+		case 3:
+			if normalizeKey(header[0]) != "partno" || normalizeKey(header[2]) != "quantity" {
+				continue
+			}
+			mode = "partNoItemQty"
+		case 2:
+			if !strings.Contains(normalizeKey(header[0]), "item") || normalizeKey(header[1]) != "quantity" {
+				continue
+			}
+			mode = "itemQtyOnly"
+		default:
+			continue
+		}
+
+		var rows [][]string
+		for r := 1; r < len(grid); r++ {
+			compressed := compressNonEmpty(grid[r])
+			if len(compressed) == 0 {
+				continue // fully blank row
+			}
+
+			switch mode {
+			case "partNoItemQty":
+				if len(compressed) != 3 {
+					log.Printf("  warning: parts table row %d has %d non-empty cells (expected 3), skipping to avoid misaligned data: %v\n",
+						r, len(compressed), compressed)
+					continue
+				}
+				rows = append(rows, compressed)
+			case "itemQtyOnly":
+				if len(compressed) != 2 {
+					log.Printf("  warning: parts table row %d has %d non-empty cells (expected 2), skipping to avoid misaligned data: %v\n",
+						r, len(compressed), compressed)
+					continue
+				}
+				rows = append(rows, []string{"", compressed[0], compressed[1]}) // no part number
+			}
+		}
+		return rows
 	}
 	return nil
+}
+
+// cellGrid converts a docTable's flat cell list into a full row/column
+// grid, including the header row (index 0), sized rowCount x columnCount.
+func cellGrid(table docTable) [][]string {
+	grid := make([][]string, table.RowCount)
+	for i := range grid {
+		grid[i] = make([]string, table.ColumnCount)
+	}
+	for _, cell := range table.Cells {
+		if cell.RowIndex < table.RowCount && cell.ColumnIndex < table.ColumnCount {
+			grid[cell.RowIndex][cell.ColumnIndex] = cell.Content
+		}
+	}
+	return grid
+}
+
+// compressNonEmpty returns only the non-blank values from a row, in order,
+// dropping empty cells entirely rather than preserving their position.
+func compressNonEmpty(row []string) []string {
+	var out []string
+	for _, v := range row {
+		if strings.TrimSpace(v) != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // extractHeaderTable finds the 2-column key-value table (Docket No, Date,
