@@ -167,24 +167,7 @@ func checkMail(ctx context.Context, tokenSource oauth2.TokenSource) error {
 						log.Printf("  failed to write job spreadsheet: %v\n", err)
 						continue
 					}
-					// images, err := pdfToImages(path)
-					// if err != nil {
-					// 	log.Printf(" failed to convert %s, %v\n", path, err)
-					// 	continue
-					// }
 
-					// var textSections []string
-					// for _, imgPath := range images {
-					// 	text, err := ocrImage(imgPath)
-					// 	if err != nil {
-					// 		log.Printf(" OCR failed on %s: %v\n", imgPath, err)
-					// 		continue
-					// 	}
-					// 	textSections = append(textSections, text)
-					// 	log.Printf(" OCR for %s:\n%s\n", imgPath, text)
-					// }
-
-					// log.Printf(" Total output of ocr for %s:\n%v\n", path, textSections)
 				}
 			}
 		}
