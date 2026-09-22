@@ -22,12 +22,14 @@ type attachmentsRespose struct {
 	Value []attachment `json:"value"`
 }
 
-func downloadAttachments(accessToken, messageID string) ([]string, error) {
-	url := fmt.Sprintf("http://graph.microsoft.com/v1.0/me/messages/%s/attachments", messageID)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("Authorization", "Bearer "+accessToken)
+func downloadAttachments(httpClient *http.Client, mailbox, messageID string) ([]string, error) {
+	url := fmt.Sprintf("http://graph.microsoft.com/v1.0/users/%s/messages/%s/attachments", mailbox, messageID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +41,7 @@ func downloadAttachments(accessToken, messageID string) ([]string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("graphreturned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("graph returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var result attachmentsRespose

@@ -7,11 +7,24 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/mail"
 	"os"
 	"time"
 
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 )
+
+func setupGraphClient() *http.Client {
+	config := &clientcredentials.Config{
+		ClientID:     os.Getenv("APP_CLIENT_ID"),
+		ClientSecret: os.Getenv("APP_CLIENT_SECRET"),
+		TokenURL:     fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", os.Getenv("APP_TENANT_ID")),
+		Scopes:       []string{"https://graph.microsoft.com/.default"},
+	}
+	return config.Client(context.Background())
+}
+
 
 func saveDeltaLink(link string) error {
 	return os.WriteFile("deltalink.txt", []byte(link), 0600)
@@ -31,41 +44,41 @@ type deltaResponse struct {
 	DeltaLink string                   `json:"@odata.deltaLink"`
 }
 
-func pollForNewMail(ctx context.Context, tokenSource oauth2.TokenSource) {
+func pollForNewMail(httpClient *http.Client, mailbox string) {
 	for {
 		log.Println("polling")
-		if err := checkMail(ctx, tokenSource); err != nil {
+		if err := checkMail(httpClient, mailbox); err != nil {
 			log.Println("poll error:", err)
 		}
 		time.Sleep(1 * time.Minute)
 	}
 }
 
-func checkMail(ctx context.Context, tokenSource oauth2.TokenSource) error {
-	token, err := tokenSource.Token()
-	if err != nil {
-		return fmt.Errorf("token refresh failed: %w", err)
-	}
-
+func checkMail(httpClient *http.Client, mailbox string) error {
 	url, err := loadDeltaLink()
 	if err != nil {
-		//url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta"
-		url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=latest"
+		//first run - no link
+		url = fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s/mailFolders/inbox/messages/delta?$deltatoken=latest", mailbox)
 	}
+
+
 
 	for url != "" {
 		log.Println("fetching: ", url)
 		req, _ := http.NewRequest("GET", url, nil)
-		req.Header.Set("Authorization", "Bearer "+token.AccessToken)
-		req.Header.Set("Prefer", "odata.maxpagesize=999")
+		if err != nil { return err }
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return err
 		}
 
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+
+		if err != nil {
+			return err
+		}
 
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("graph returned %d: %s", resp.StatusCode, string(body))
@@ -80,48 +93,49 @@ func checkMail(ctx context.Context, tokenSource oauth2.TokenSource) error {
 			subject, _ := msg["subject"].(string)
 			hasAttachments, _ := msg["hasAttachments"].(bool)
 			id, _ := msg["id"].(string)
-			if hasAttachments {
-				log.Printf("New Message with attachment %s (%s)\n", subject, id)
-				paths, err := downloadAttachments(token.AccessToken, id)
+
+			if !hasAttachments { continue }
+			log.Printf("New Message with attachment %s (%s)\n", subject, id)
+
+			paths, err := downloadAttachments(httpClient, mailbox, id)
+			if err != nil {
+				log.Printf(" failed to download attachments for %s: %v\n", id, err)
+				continue
+			}
+
+			for _, path := range paths {
+				docket, err := extractDocketFromPDF(path)
 				if err != nil {
-					log.Printf("failed to download attachments for %s: %v\n", id, err)
+					log.Printf(" failed to extract docket from %s: %v\n", path, err)
 					continue
 				}
 
-				for _, path := range paths {
-					log.Printf(" -> converting and conduction ocr OCR: %s\n", path)
+				for _, row := ragne docket.Rows {
+					log.Printf(" part row: %v\n", row)
+				}
 
-					docket, err := extractDocketFromPDF(path)
-					if err != nil {
-						log.Printf("failed to extract docket from %s: %v\n", path, err)
-						continue
-					}
+				outputDir := os.Getenv("LOCAL_JOB_FILES_DIR")
+				if outputDir == ""{
+					outputDir = "./local-job-files"
+				}
 
-					log.Printf(" docket %s / job %s \n,", docket.Header["docketno"], docket.Header["jobno"])
-					for _, row := range docket.Rows {
-						log.Printf("  part row: %v\n", row)
-						// TODO: write [docket.Header["docketno"], row[0], row[1], row[2]] to SharePoint
-					}
-
-					outputDir := os.Getenv("LOCAL_JOB_FILES_DIR")
-					if outputDir == "" {
-						outputDir = "./local-job-files"
-					}
-					if err := addDocketToLocalJobFile(outputDir, docket); err != nil {
-						log.Printf("  failed to write job spreadsheet: %v\n", err)
-						continue
-					}
-
+				if err := addDocketToLocalJobFile(outputDir, docket); err != nil {
+					log.Printf(" failed to write job spreadsheet: %v\n", err)
 				}
 			}
 		}
+
 
 		if result.NextLink != "" {
 			url = result.NextLink
 		} else {
 			url = ""
 			if result.DeltaLink != "" {
-				saveDeltaLink(result.DeltaLink)
+				if err := saveDeltaLink(result.DeltaLink); err != nil{
+					log.Println("failed to save delta link:", err)
+				}else{
+					log.Println("saved new delta link")
+				}
 			}
 		}
 	}
