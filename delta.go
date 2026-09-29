@@ -7,11 +7,9 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/mail"
 	"os"
 	"time"
 
-	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
 
@@ -24,7 +22,6 @@ func setupGraphClient() *http.Client {
 	}
 	return config.Client(context.Background())
 }
-
 
 func saveDeltaLink(link string) error {
 	return os.WriteFile("deltalink.txt", []byte(link), 0600)
@@ -61,12 +58,12 @@ func checkMail(httpClient *http.Client, mailbox string) error {
 		url = fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s/mailFolders/inbox/messages/delta?$deltatoken=latest", mailbox)
 	}
 
-
-
 	for url != "" {
 		log.Println("fetching: ", url)
 		req, _ := http.NewRequest("GET", url, nil)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -94,7 +91,9 @@ func checkMail(httpClient *http.Client, mailbox string) error {
 			hasAttachments, _ := msg["hasAttachments"].(bool)
 			id, _ := msg["id"].(string)
 
-			if !hasAttachments { continue }
+			if !hasAttachments {
+				continue
+			}
 			log.Printf("New Message with attachment %s (%s)\n", subject, id)
 
 			paths, err := downloadAttachments(httpClient, mailbox, id)
@@ -110,12 +109,12 @@ func checkMail(httpClient *http.Client, mailbox string) error {
 					continue
 				}
 
-				for _, row := ragne docket.Rows {
+				for _, row := range docket.Rows {
 					log.Printf(" part row: %v\n", row)
 				}
 
 				outputDir := os.Getenv("LOCAL_JOB_FILES_DIR")
-				if outputDir == ""{
+				if outputDir == "" {
 					outputDir = "./local-job-files"
 				}
 
@@ -125,15 +124,14 @@ func checkMail(httpClient *http.Client, mailbox string) error {
 			}
 		}
 
-
 		if result.NextLink != "" {
 			url = result.NextLink
 		} else {
 			url = ""
 			if result.DeltaLink != "" {
-				if err := saveDeltaLink(result.DeltaLink); err != nil{
+				if err := saveDeltaLink(result.DeltaLink); err != nil {
 					log.Println("failed to save delta link:", err)
-				}else{
+				} else {
 					log.Println("saved new delta link")
 				}
 			}
